@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         映尺 · Netflix IMDb 评分
 // @namespace    https://github.com/dwzzz/netflix-imdb-dist
-// @version      1.0.1
+// @version      1.0.2
 // @description  在 Netflix 页面显示 IMDb / 豆瓣评分，自动匹配作品，必要时可手动纠正。
 // @antifeature  membership 需要邀请码注册并生成 API key 才能使用；服务完全免费，邀请机制仅用于防止接口被爬虫或滥用。
 // @license      MIT
