@@ -33,6 +33,10 @@ _详情页点击评分，可以跳转到对应 imdb 或者豆瓣页面_
 
 注册不需要邮箱，也不需要密码，只用 Passkey。数据库哪天真被人偷了，甚至被挂到 Google + Facebook 首页，你也没什么隐私可以泄露。
 
+### English
+
+This script adds IMDb and Douban ratings to Netflix. It runs on my own server, so access is invite-only to keep traffic manageable. Follow the invite link above to sign up with a passkey—no email or password needed.
+
 ## 安装
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 或 [Violentmonkey](https://violentmonkey.github.io/)。
