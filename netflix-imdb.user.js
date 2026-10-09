@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         映尺 · Netflix IMDb 评分
 // @namespace    https://github.com/dwzzz/netflix-imdb-dist
-// @version      1.0.2
+// @version      1.0.4
 // @description  在 Netflix 页面显示 IMDb / 豆瓣评分，自动匹配作品，必要时可手动纠正。
 // @antifeature  membership 需要邀请码注册并生成 API key 才能使用；服务完全免费，邀请机制仅用于防止接口被爬虫或滥用。
 // @license      MIT
@@ -26,6 +26,8 @@
  * Netflix userscript for displaying IMDb / Douban ratings through ratings.op13.uk.
  * The browser talks only to the configured ratings service; matching and upstream data collection happen on the backend.
  * Ratings and confirmed title mappings are cached locally, with manual corrections taking precedence over automatic matches.
+ * Supplementary Douban snapshots retain only validated metadata compatible with the confirmed title and link scope.
+ * First-time setup links to the public invitation guide and distinguishes an API key from an invitation code.
  * No analytics, remote executable code, or embedded credentials.
  */
 (() => {
@@ -575,10 +577,18 @@
       if (record.invalid || record.manual || (expected && (record.epoch !== expected.epoch || (revisions.get(id) || 0) !== expected.revision))) return false;
       if (record.epoch >= Number.MAX_SAFE_INTEGER) throw new Error('作品版本已达上限');
       const previous = record.score, retain = !data.rating && previous?.data?.id === data.id && previous.data.rating;
-      const retainDouban = previous?.data?.id === data.id && data.doubanRatingChecked !== true
-        && Number.isSafeInteger(data.doubanId) && data.doubanId === previous.data.doubanId
-        && previous.data.doubanRatingChecked === true;
+      const sameDouban = previous?.data?.id === data.id && previous.data.type === data.type
+        && Number.isSafeInteger(data.doubanId) && data.doubanId > 0 && data.doubanId === previous.data.doubanId;
+      // A parent-series GET omits the season number. Reuse only the same subject's validated exact-season metadata.
+      const retainSeason = sameDouban && data.type === 'series' && data.doubanLinkScope === 'season'
+        && data.doubanSeason === undefined && previous.data.doubanLinkScope === 'season'
+        && Number.isSafeInteger(previous.data.doubanSeason) && previous.data.doubanSeason >= 1 && previous.data.doubanSeason <= 99;
+      const season = retainSeason ? previous.data.doubanSeason : data.doubanSeason;
+      const retainDouban = sameDouban && data.doubanRatingChecked !== true && previous.data.doubanRatingChecked === true
+        && (data.type === 'movie' || (data.type === 'series' && data.doubanLinkScope === 'season'
+          && Number.isSafeInteger(season) && season >= 1 && season <= 99));
       const score = {time:retain ? previous.time : Date.now(),data:{...data,source:'service',
+        ...(retainSeason ? {doubanSeason:season} : {}),
         ...(retain ? {rating:previous.data.rating,votes:previous.data.votes} : {}),
         ...(retainDouban ? {doubanRatingChecked:true,
           ...(typeof previous.data.doubanRating === 'string' ? {doubanRating:previous.data.doubanRating} : {}),
@@ -703,7 +713,7 @@
       button { border:0; border-radius:4px; padding:8px 13px; cursor:pointer; min-height:34px;
         background:transparent; color:#b3b3b3; line-height:1.4; }
       button:hover { background:#ffffff12; color:#fff; }
-      button:focus-visible, input:focus-visible { outline:2px solid #eee; outline-offset:3px; }
+      button:focus-visible, input:focus-visible, .setup-help a:focus-visible { outline:2px solid #eee; outline-offset:3px; }
       .primary { background:#e9e9e9; color:#181818; font-weight:600; }
       .primary:hover { background:#fff; color:#111; }
       button:disabled { opacity:.55; cursor:default; }
@@ -715,6 +725,7 @@
         color:#fff; padding:10px 11px; font-size:14px; }
       input[aria-invalid="true"] { border-color:#cfaa71; }
       .note { color:#999; font-size:11px; line-height:1.6; margin-top:12px; }
+      .setup-help a { color:#ddd; text-underline-offset:3px; }
       .message { color:#dcc39e; font-size:12px; }
       .announcement { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
       .disconnect { padding:0; min-height:28px; font-size:11px; margin-top:6px; color:#999; }
@@ -723,14 +734,15 @@
     </style>
     <button class="chip" type="button" aria-label="连接 IMDb 评分服务" hidden>IMDb · 连接</button>
     <section class="panel" aria-labelledby="connection-title">
-      <h2 id="connection-title">IMDb 评分</h2><p class="description"></p>
-      <div class="actions welcome-actions"><button class="primary connect" type="button">连接</button><button class="later" type="button">稍后</button></div>
+      <h2 id="connection-title">映尺 · IMDb / 豆瓣评分</h2><p class="description"></p>
+      <p class="setup-help"><a href="https://github.com/dwzzz/netflix-imdb-dist#%E4%B8%BA%E4%BB%80%E4%B9%88%E9%9C%80%E8%A6%81%E9%82%80%E8%AF%B7%E6%89%8D%E8%83%BD%E4%BD%BF%E7%94%A8" target="_blank" rel="noopener noreferrer">获取邀请与注册说明 ↗</a></p>
+      <div class="actions welcome-actions"><button class="primary connect" type="button">我已有密钥</button><button class="later" type="button">稍后</button></div>
       <form hidden>
-        <label for="connection-token">访问 Token</label>
-        <input id="connection-token" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="粘贴访问 Token" aria-describedby="connection-note connection-message">
+        <label for="connection-token">访问密钥（API key）</label>
+        <input id="connection-token" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="粘贴个人 API key" aria-describedby="connection-note connection-message">
         <p id="connection-message" class="message" role="status" aria-live="polite" hidden></p>
         <div class="actions"><button class="primary save" type="submit">保存并连接</button><button class="cancel" type="button">取消</button></div>
-        <p id="connection-note" class="note">仅用于 ratings.op13.uk，保存在脚本存储。<br>没有 Token？请联系邀请人。</p>
+        <p id="connection-note" class="note">用邀请链接注册后，在评分服务中生成个人 API key。<br>这里填 API key，不填邀请码或 Netflix 密码。密钥仅用于 ratings.op13.uk，并保存在脚本存储。</p>
         <button class="disconnect" type="button" hidden>断开连接</button>
       </form>
       <span class="announcement" role="status" aria-live="polite"></span>
@@ -788,10 +800,10 @@
     const collapsed = ui.dismissed && !ui.open && !ui.success;
     ui.panel.hidden = collapsed; ui.chip.hidden = !collapsed;
     ui.form.hidden = !ui.open; ui.actions.hidden = ui.open || ui.success;
-    ui.title.textContent = ui.open ? '连接 IMDb 评分' : ui.success ? '已连接' : halted ? '评分服务已暂停' : 'IMDb 评分';
-    ui.description.textContent = ui.open ? '粘贴访问 Token，评分会在当前页面自动出现。'
-      : ui.success ? '正在加载 IMDb 评分。' : halted ? 'Token 无效或权限不足，重新连接即可继续。'
-      : '还差一步：连接评分服务，即可在海报上查看评分。';
+    ui.title.textContent = ui.open ? '连接评分服务' : ui.success ? '已连接' : halted ? '评分服务已暂停' : '映尺 · IMDb / 豆瓣评分';
+    ui.description.textContent = ui.open ? '在评分服务中生成 API key，再粘贴到这里连接。'
+      : ui.success ? '连接成功，评分会陆续显示在海报和详情中。' : halted ? '访问密钥无效或权限不足，重新连接即可继续。'
+      : '免费显示 IMDb / 豆瓣评分。首次使用请先获取邀请并注册评分服务。';
     ui.save.disabled = ui.busy; ui.input.readOnly = ui.busy; ui.disconnect.disabled = ui.busy;
     ui.save.textContent = ui.busy ? '验证中…' : '保存并连接';
     ui.message.hidden = !ui.open || !ui.message.textContent;
@@ -823,7 +835,7 @@
     if (!ui || !ui.open || ui.busy) return;
     const token = ui.input.value.trim();
     if (!/^[A-Za-z0-9_-]{32,128}$/.test(token)) {
-      ui.message.textContent = token ? 'Token 格式不正确，请确认复制完整。' : '请粘贴访问 Token。';
+      ui.message.textContent = token ? 'API key 格式不正确，请复制完整的个人密钥。' : '请粘贴注册后生成的个人 API key。';
       ui.input.setAttribute('aria-invalid','true'); updateConnectionUi(); ui.input.focus(); return;
     }
     const serial = ++ui.serial;
@@ -842,9 +854,9 @@
       if (!ui.open || ui.serial !== serial) return;
       ui.busy = false;
       ui.message.textContent = error.storageFailure ? '未能保存到脚本存储，请重试。'
-        : error.httpStatus === 401 || error.httpStatus === 403 ? 'Token 无效或权限不足，请重新确认。'
+        : error.httpStatus === 401 || error.httpStatus === 403 ? 'API key 无效或权限不足，请在评分服务中检查或重新生成密钥。'
         : error.httpStatus === 429 ? '服务正在限流，请稍后再试。'
-        : '暂时无法连接评分服务。Token 尚未保存，可稍后重试。';
+        : '暂时无法连接评分服务。密钥尚未保存，可稍后重试。';
       updateConnectionUi();
       if (ui.root && !ui.host.hidden && (document.activeElement === document.body || document.activeElement === ui.host)) {
         ui.input.focus({preventScroll:true});

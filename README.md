@@ -42,7 +42,7 @@ This script adds IMDb and Douban ratings to Netflix. It runs on my own server, s
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 或 [Violentmonkey](https://violentmonkey.github.io/)。
 2. 从 [Greasy Fork 安装映尺][greasyfork]。
 3. 用上面的邀请链接注册，生成个人 API key。
-4. 打开 Netflix，把 API key 粘贴到右下角弹出的 Token 输入框。
+4. 打开 Netflix，点击“我已有密钥”，把 API key 粘贴到“访问密钥（API key）”输入框。
 
 ## 反馈
 
