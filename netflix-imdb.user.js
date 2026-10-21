@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         映尺 · Netflix IMDb 评分
 // @namespace    https://github.com/dwzzz/netflix-imdb-dist
-// @version      1.0.4
+// @version      1.0.5
 // @description  在 Netflix 页面显示 IMDb / 豆瓣评分，自动匹配作品，必要时可手动纠正。
 // @antifeature  membership 需要邀请码注册并生成 API key 才能使用；服务完全免费，邀请机制仅用于防止接口被爬虫或滥用。
 // @license      MIT
@@ -28,6 +28,7 @@
  * Ratings and confirmed title mappings are cached locally, with manual corrections taking precedence over automatic matches.
  * Supplementary Douban snapshots retain only validated metadata compatible with the confirmed title and link scope.
  * First-time setup links to the public invitation guide and distinguishes an API key from an invitation code.
+ * Scoped catalog-series identities retain explicit whole-series scope and never certify an episode or season.
  * No analytics, remote executable code, or embedded credentials.
  */
 (() => {
@@ -85,7 +86,20 @@
     // Scope is authoritative only as a complete structural tuple, never a title-search candidate.
     const own = data.identity?.data;
     const scoped = own && (Object.hasOwn(own,'mapping_scope') || Object.hasOwn(own,'rating_scope'));
-    if (scoped) {
+    // A versioned business tuple proves score scope without exposing matching-provider details.
+    const scopedIdentity = Object.hasOwn(data,'identity_schema')
+      || (own && (Object.hasOwn(own,'exact') || Object.hasOwn(own,'netflix_scope')));
+    if (scopedIdentity) {
+      const movie = own?.kind === 'movie';
+      if (data.identity_schema !== 'scoped-v1' || !netflix || data.status !== 'ok' || data.netflix_id !== requestedId
+        || !own || typeof own !== 'object' || Array.isArray(own)
+        || data.identity.status !== 'ok' || Object.hasOwn(data,'match')
+        || own.imdb_id !== data.imdb_id || own.kind !== data.kind || !['movie','series'].includes(own.kind)
+        || own.mapping_scope !== (movie ? 'exact' : 'catalog_series') || own.rating_scope !== own.kind
+        || own.exact !== movie || own.netflix_scope !== (movie ? 'movie' : 'unknown')) {
+        return fail('评分服务身份范围或结构不一致');
+      }
+    } else if (scoped) {
       const evidence = own.evidence;
       const qid = value => typeof value === 'string' && /^Q[1-9]\d{0,15}$/.test(value);
       if (!netflix || data.status !== 'ok' || data.netflix_id !== requestedId
@@ -136,18 +150,26 @@
     const wikidataEntity = /^Q[1-9]\d{0,15}$/.test(own?.wikidata_id || '')
       && own.source === `https://www.wikidata.org/wiki/${own.wikidata_id}`;
     const linkChecked = netflix && !Object.hasOwn(data,'match') && ['movie','series'].includes(data.kind)
-      && wikidataEntity && own?.douban_link_checked === true;
+      && (scopedIdentity || (wikidataEntity && own?.douban_link_checked === true));
     if (linkChecked && data.kind === 'series' && !scoped) {
       const present = own.douban_link_id !== null;
       if ((present && (!Number.isSafeInteger(own.douban_link_id) || own.douban_link_id <= 0 || own.douban_link_scope !== 'representative'))
         || (!present && own.douban_link_scope !== null)) return fail('评分服务电视剧豆瓣链接结构异常');
     }
     let doubanId = null, doubanLinkScope, doubanRatingMeta = {};
-    if (linkChecked && data.kind === 'movie' && Number.isSafeInteger(own.douban_id) && own.douban_id > 0) {
+    if (linkChecked && !scopedIdentity && data.kind === 'movie' && Number.isSafeInteger(own.douban_id) && own.douban_id > 0) {
       doubanId = own.douban_id;
-    } else if (linkChecked && data.kind === 'series' && Number.isSafeInteger(own.douban_link_id) && own.douban_link_id > 0
+    } else if (linkChecked && !scopedIdentity && data.kind === 'series' && Number.isSafeInteger(own.douban_link_id) && own.douban_link_id > 0
       && ['representative','season'].includes(own.douban_link_scope)) {
       doubanId = own.douban_link_id; doubanLinkScope = own.douban_link_scope;
+    }
+    // Scoped movie enrichment must explicitly recover the same IMDb identity before exposing its subject or score.
+    if (scopedIdentity && data.kind === 'movie' && data.douban?.status === 'ok') {
+      const value = data.douban.data;
+      if (!value || typeof value !== 'object' || Array.isArray(value)
+        || value.imdb_id !== data.imdb_id || value.identity_recovered !== true
+        || !Number.isSafeInteger(value.id) || value.id <= 0) return fail('评分服务电影豆瓣身份不一致');
+      doubanId = value.id;
     }
     if (linkChecked && data.kind === 'movie' && doubanId && data.douban?.status === 'ok') {
       const value = data.douban.data, source = `https://movie.douban.com/subject/${doubanId}/`;
@@ -165,7 +187,7 @@
       } else doubanRatingMeta = {doubanRatingChecked:true};
     }
     return {status:'ok', data:{id:data.imdb_id,title:title || data.imdb_id,year:'',type:compatible ? extra.kind : data.kind,
-      ...(scoped ? {mappingScope:'parent_series',ratingScope:'series'} : {}),
+      ...(scoped && data.kind === 'series' ? {mappingScope:own.mapping_scope,ratingScope:'series'} : {}),
       ...(linkChecked ? {doubanLinkChecked:true} : {}),
       ...(doubanId ? {doubanId,...(doubanLinkScope ? {doubanLinkScope} : {})} : {}),
       ...doubanRatingMeta,
@@ -370,7 +392,7 @@
     return x && Number.isFinite(x.time) && x.time <= Date.now()
       && /^tt\d{7,10}$/.test(x.data?.id || '') && ['movie','series','unknown'].includes(x.data.type)
       && ((!Object.hasOwn(x.data,'mappingScope') && !Object.hasOwn(x.data,'ratingScope'))
-        || (x.data.mappingScope === 'parent_series' && x.data.ratingScope === 'series' && x.data.type === 'series'
+        || (['parent_series','catalog_series'].includes(x.data.mappingScope) && x.data.ratingScope === 'series' && x.data.type === 'series'
           && x.mapping === undefined && x.data.source !== 'manual'))
       && (x.data.doubanLinkChecked === undefined || x.data.doubanLinkChecked === true)
       && (x.data.doubanId === undefined || (Number.isSafeInteger(x.data.doubanId) && x.data.doubanId > 0))
@@ -507,7 +529,7 @@
     return !!entry && entry.mapping === undefined && Number.isFinite(entry.time) && entry.time <= Date.now()
       && /^tt\d{7,10}$/.test(entry.data?.id || '') && ['movie','series','unknown'].includes(entry.data.type)
       && ((!Object.hasOwn(entry.data,'mappingScope') && !Object.hasOwn(entry.data,'ratingScope'))
-        || (entry.data.mappingScope === 'parent_series' && entry.data.ratingScope === 'series' && entry.data.type === 'series'));
+        || (['parent_series','catalog_series'].includes(entry.data.mappingScope) && entry.data.ratingScope === 'series' && entry.data.type === 'series'));
   }
   function identityRoute(id) {
     return recordIdentity(readTitleRecord(id));
@@ -1027,8 +1049,13 @@
       // Only a complete identity-bound response may narrow a shared transport failure.
       const retryBoundary = (data,status) => {
         if (status !== 503 || !data || typeof data !== 'object' || Array.isArray(data)
-          || (netflix ? data.netflix_id !== id : data.imdb_id !== id)
-          || !['wikidata','tmdb','douban'].includes(data.provider)) return {};
+          || (netflix ? data.netflix_id !== id : data.imdb_id !== id)) return {};
+        // A versioned identity failure applies only to this query, never an account-wide HTTP 429.
+        if (netflix && data.identity_schema === 'scoped-v1' && data.scope === 'resource'
+          && data.reason === 'identity_unavailable' && ['temporary_failure','rate_limited'].includes(data.status)) {
+          return {retryScope:'query',scope:'resource',reason:data.reason};
+        }
+        if (!['wikidata','tmdb','douban'].includes(data.provider)) return {};
         const local = (data.status === 'busy' && (
           (data.scope === 'source' && data.reason === 'source_queue_full')
           || (data.scope === 'account' && data.reason === 'account_cold_tasks')))
@@ -1061,7 +1088,9 @@
           body = JSON.stringify(params.hints);
           if (typeof body !== 'string' || new TextEncoder().encode(body).byteLength > 2048) { finish(error('详情提示超过2048字节')); return; }
         }
-        handle = GM_xmlhttpRequest({method:post ? 'POST' : 'GET',url:'https://ratings.op13.uk/api/v1/'+(health ? 'health' : (netflix ? 'netflix/' : 'imdb/')+id),
+        // Advertise scoped-identity support at the HTTP boundary; old services can ignore this query parameter.
+        handle = GM_xmlhttpRequest({method:post ? 'POST' : 'GET',url:'https://ratings.op13.uk/api/v1/'+(health ? 'health' : (netflix ? 'netflix/' : 'imdb/')+id)
+          +(netflix && !health ? '?identity_schema=scoped-v1' : ''),
           anonymous:true,redirect:'error',timeout:6000,headers:{Authorization:'Bearer '+credential,Accept:'application/json',...(post ? {'Content-Type':'application/json'} : {})},
           ...(post ? {data:body} : {}),
           onreadystatechange:response=>{
@@ -1475,7 +1504,7 @@
     const authHidden = (!ratingsToken || !!halted) && !data?.rating;
     if (item.badge.hidden !== authHidden) item.badge.hidden = authHidden;
     if (item.row && item.row.hidden !== authHidden) item.row.hidden = authHidden;
-    const scoped = data?.mappingScope === 'parent_series' && data.ratingScope === 'series';
+    const scoped = ['parent_series','catalog_series'].includes(data?.mappingScope) && data.ratingScope === 'series';
     const text = (message || (data ? (data.rating ? `IMDb ${data.rating}` : 'IMDb 暂未获取评分') : 'IMDb 待匹配'))
       + (scoped ? ' · 整剧' : '');
     if (item.badge.textContent !== text) {
@@ -1532,7 +1561,9 @@
     if (data?.source === 'manual' && item.card.classList.contains('mini-modal')) title += '\n手动确认';
     if (data?.provider === 'ratings') title += '\n评分来源：IMDb 官方每日数据集' + (data.stale ? '\n服务器保留的旧数据，更新暂未完成' : '');
     if (data?.source === 'detail') title += '\n来自此作品已确认的详情匹配';
-    if (scoped) title += '\n这是父剧集整体的 IMDb 评分，不是当前 Netflix 分季或单集的评分';
+    if (scoped) title += data.mappingScope === 'catalog_series'
+      ? '\n这是对应整剧的 IMDb 评分；Netflix 输入层级未确认，不是分季或单集的精确评分'
+      : '\n这是父剧集整体的 IMDb 评分，不是当前 Netflix 分季或单集的评分';
     if (item.badge.title !== title) item.badge.title = title;
   }
   async function load(item) {
