@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         映尺 · Netflix IMDb 评分
 // @namespace    https://github.com/dwzzz/netflix-imdb-dist
-// @version      1.0.6
+// @version      1.0.7
 // @description  在 Netflix 页面显示 IMDb / 豆瓣评分，自动匹配作品，必要时可手动纠正。
 // @antifeature  membership 需要邀请码注册并生成 API key 才能使用；服务完全免费，邀请机制仅用于防止接口被爬虫或滥用。
 // @license      MIT
@@ -29,7 +29,7 @@
  * Missing refresh results silently retain existing rated snapshots without renewing their cache age.
  * Supplementary Douban snapshots retain only validated metadata compatible with the confirmed title and link scope.
  * First-time setup links to the public invitation guide and distinguishes an API key from an invitation code.
- * Full-detail requests can include bounded visible work observations, with explicit scope and no account/playback state.
+ * Full-detail matching uses bounded title, year, kind and language hints.
  * Detail hints use conflict-free title identities and API-compatible locale tags without weakening match evidence.
  * Scoped catalog-series identities retain explicit whole-series scope and never certify an episode or season.
  * Explicit episodic cards and episode/conflicting detail identities are excluded before rating lookup.
@@ -252,273 +252,7 @@
     }
     const hints = {title,kind:series ? 'series' : 'movie',language};
     if (/^\d{4}$/.test(yearText) && Number(yearText) >= 1870 && Number(yearText) <= 2100) hints.year = Number(yearText);
-    const v2 = readClientObservationV2(root,info);
-    const observation = v2 === undefined ? readClientObservation(root,info) : v2;
-    if (observation && (observation.schema_version !== 'netflix-client-observation/v2'
-      || observation.scope.kind === 'unknown' || observation.scope.kind === hints.kind)) {
-      hints.client_observation = observation;
-      if (new TextEncoder().encode(JSON.stringify(hints)).byteLength > 8192) delete hints.client_observation;
-    }
     return hints;
-  }
-  const detailObservationSubjects = new WeakMap();
-  // A rendered box can still be hidden through CSS or an ancestor's accessibility state.
-  function visibleObservationNode(node) {
-    if (!node?.getClientRects?.().length || node.closest?.('[hidden],[aria-hidden="true"]')
-      || typeof getComputedStyle !== 'function') return false;
-    for (let current = node; current; current = current.parentElement) {
-      const style = getComputedStyle(current);
-      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
-    }
-    return true;
-  }
-  // innerText can include aria-hidden or transparent descendants; omit ambiguous mixed labels entirely.
-  function observationText(node) {
-    if (!visibleObservationNode(node)
-      || [...(node.querySelectorAll?.('*') || [])].some(child=>!visibleObservationNode(child))) return '';
-    return node.innerText?.trim() || '';
-  }
-  // Observe only visible full-modal cast fields; search hints never certify a movie or episode scope.
-  function readClientObservation(root, info) {
-    if (!root?.isConnected || !info || info.mini || !/^\d{6,10}$/.test(info.id || '')
-      || !visibleObservationNode(root) || root.hidden || root.getAttribute?.('aria-hidden') === 'true') return null;
-    const before = readDetail(root);
-    if (!before || before.id !== info.id || before.title !== info.title || before.mount !== info.mount) return null;
-    const metadata = root.querySelector('.previewModal--detailsMetadata-info .videoMetadata--container');
-    const countNode = metadata?.querySelector('.numberOfSeasons');
-    const count = observationText(countNode);
-    const series = count.length <= 100 && /^(?:共\s*)?[1-9]\d{0,4}\s*(?:集|季|episodes?|seasons?)$|^(?:限定[剧劇]集?|limited series)$/i.test(count);
-    const scope = {kind:series ? 'series' : 'unknown'}, facts = [], seen = new Set();
-    const groups = [...root.querySelectorAll('.previewModal--detailsMetadata-right > .previewModal--tags')].filter(group => {
-      const labelNode = group.querySelector('.previewModal--tags-label');
-      return visibleObservationNode(group) && visibleObservationNode(labelNode)
-        && /^(?:cast|starring|actors?|主演|演员|演員|出演|出演者)\s*[:：]?$/i.test(observationText(labelNode));
-    });
-    if (groups.length !== 1) return null;
-    for (const group of groups) {
-      for (const [index,item] of [...group.querySelectorAll('.tag-item')].slice(0,12).entries()) {
-        if (!visibleObservationNode(item)) continue;
-        const link = item.querySelector('a[href]');
-        const textNode = link || item;
-        if (!visibleObservationNode(textNode)) continue;
-        const value = observationText(textNode).replace(/[,，]\s*$/, '').trim();
-        const bytes = new TextEncoder(), lower = value.toLowerCase();
-        // Match the v1 intake allowlist without normalizing or translating the observed name.
-        if (!value || !/^[\p{L}\p{N}\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f '’ .·・()（）&-]+$/u.test(value)
-          || !/[\p{L}\p{N}]/u.test(value)
-          || bytes.encode(value).byteLength > 160 || (value.match(/[0-9]/g) || []).length >= 9
-          || lower.includes('www.') || lower.includes('private key') || /^(?:bearer |sk-|akia)/.test(lower)
-          || value.split(/\s+/).some(part=>bytes.encode(part).byteLength >= 32 && /[a-z]/i.test(part) && /[0-9]/.test(part))
-          || /^(?:more|更多|查看更多|もっと見る|他)$/i.test(value)) continue;
-        let entity;
-        try {
-          const href = link?.getAttribute('href');
-          if (typeof href === 'string' && href.length <= 4096) {
-            const url = new URL(href,'https://www.netflix.com');
-            const match = url.pathname.match(/^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?browse\/person\/([1-9]\d{0,15})\/?$/i);
-            if (url.origin === 'https://www.netflix.com' && !url.username && !url.password && match) entity = 'netflix:'+match[1];
-          }
-        } catch {}
-        const key = JSON.stringify([value,entity || null]);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        facts.push({family:'person',value,scope:{...scope},field_path:'full_modal.cast['+index+']',
-          role:'cast_unspecified',...(entity ? {entity_id:entity} : {})});
-      }
-    }
-    const after = readDetail(root);
-    if (!facts.length || !root.isConnected || !visibleObservationNode(root) || !after
-      || after.id !== before.id || after.title !== before.title || after.mount !== before.mount) return null;
-    const subject = JSON.stringify([info.id,info.title]);
-    const signature = JSON.stringify(facts.map(fact=>[fact.value,fact.entity_id || null,fact.field_path]));
-    const previous = detailObservationSubjects.get(root);
-    const blocked = !!previous && previous.group === groups[0] && previous.signature === signature
-      && (previous.subject !== subject || previous.blocked);
-    detailObservationSubjects.set(root,{subject,group:groups[0],signature,blocked});
-    // A reused modal must replace or change its cast after a title switch, even across later polls.
-    if (blocked) return null;
-    return {schema_version:'netflix-client-observation/v1',source_id:info.id,extractor_version:'full-modal-dom/v1',
-      observed_at:new Date().toISOString(),scope,...(series ? {scope_field_path:'full_modal.metadata.numberOfSeasons'} : {}),facts};
-  }
-  // Read only currently displayed small fields; clipped or mixed-hidden synopsis text is omitted.
-  function detailTextV2(node, synopsis = false) {
-    if (!visibleObservationNode(node) || !node?.getBoundingClientRect) return '';
-    const descendants = [...(node.querySelectorAll?.('*') || [])];
-    if (descendants.length > 32) return '';
-    const width = globalThis.innerWidth, height = globalThis.innerHeight;
-    for (const target of [node,...descendants]) {
-      if (!visibleObservationNode(target) || !target.getBoundingClientRect) return '';
-      const box = target.getBoundingClientRect();
-      if (!(width > 0 && height > 0 && box.width > 0 && box.height > 0)) return '';
-      if (box.left < 0 || box.top < 0 || box.right > width || box.bottom > height) return '';
-      // Every evidence label must fit the effective clip frame before its text is read.
-      for (let current = target; current; current = current.parentElement) {
-        const style = getComputedStyle(current);
-        if (parseInt(style.webkitLineClamp || style.lineClamp,10) > 0
-          || (style.clipPath && style.clipPath !== 'none') || (style.maskImage && style.maskImage !== 'none')) return '';
-        const clipX = /^(?:hidden|clip|scroll|auto)$/.test(style.overflowX || '');
-        const clipY = /^(?:hidden|clip|scroll|auto)$/.test(style.overflowY || '');
-        if ((clipX || clipY) && current.getBoundingClientRect) {
-          const area = current.getBoundingClientRect();
-          const sx = current.offsetWidth > 0 ? area.width/current.offsetWidth : 1;
-          const sy = current.offsetHeight > 0 ? area.height/current.offsetHeight : 1;
-          const x = area.left+(current.clientLeft || 0)*sx, y = area.top+(current.clientTop || 0)*sy;
-          const right = x+(current.clientWidth > 0 ? current.clientWidth*sx : area.width);
-          const bottom = y+(current.clientHeight > 0 ? current.clientHeight*sy : area.height);
-          if ((clipX && (box.left < x-.5 || box.right > right+.5))
-            || (clipY && (box.top < y-.5 || box.bottom > bottom+.5))) return '';
-        }
-      }
-      if ((target.clientWidth > 0 && target.scrollWidth > target.clientWidth+1)
-        || (target.clientHeight > 0 && target.scrollHeight > target.clientHeight+1)) return '';
-    }
-    const value = observationText(node);
-    if (!value || !synopsis) return value;
-    const lower = value.toLowerCase(), bytes = new TextEncoder();
-    if (bytes.encode(value).byteLength > 1600 || !/[\p{L}\p{N}]/u.test(value)
-      || /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff<>@]/.test(value)
-      || /www\.|https?:\/\/|private key|password=|cookie=|token=|bearer /.test(lower) || /^(?:sk-|akia)/.test(lower)
-      || value.split(/\s+/).some(part=>bytes.encode(part).byteLength >= 32 && /[a-z]/i.test(part) && /[0-9]/.test(part))
-      || /(?:\.\.\.|…)[\s。.!?！？]*$/.test(value) || node.getAttribute('aria-expanded') === 'false') return '';
-    return value;
-  }
-  // Require one observed metadata owner and positive type evidence; duration never certifies a movie.
-  function readDetailScopeV2(root) {
-    if (!root?.matches?.('[role="dialog"].detail-modal') || !visibleObservationNode(root)) return null;
-    const owners = [...root.querySelectorAll('[data-uia="previewModal--detailsMetadata"]')];
-    if (owners.length !== 1 || !owners[0].classList.contains('previewModal--detailsMetadata')
-      || owners[0].closest('[role="dialog"].detail-modal') !== root || !visibleObservationNode(owners[0])) return null;
-    const owner = owners[0], lefts = owner.querySelectorAll(':scope > .previewModal--detailsMetadata-left');
-    const rights = owner.querySelectorAll(':scope > .previewModal--detailsMetadata-right');
-    if (lefts.length !== 1 || rights.length !== 1) return null;
-    const left = lefts[0], right = rights[0], infos = left.querySelectorAll('.previewModal--detailsMetadata-info');
-    if (infos.length !== 1 || !visibleObservationNode(left) || !visibleObservationNode(right)) return null;
-    const info = infos[0], durations = info.querySelectorAll('.duration'), counts = info.querySelectorAll('.numberOfSeasons');
-    const duration = durations.length === 1 ? detailTextV2(durations[0]) : '';
-    const count = counts.length === 1 ? detailTextV2(counts[0]) : '';
-    const labels = [...right.querySelectorAll(':scope > [data-uia="previewModal--tags-genre"] > .previewModal--tags-label')];
-    const movies = labels.filter(node=>detailTextV2(node) === '此电影：');
-    const episodeRoots = [...root.querySelectorAll('[data-uia="episode-selector"]')];
-    const episodeLabels = episodeRoots.length === 1 ? [...episodeRoots[0].querySelectorAll('.episodeSelector-label')]
-      .filter(node=>detailTextV2(node) === '剧集') : [];
-    const seasons = /^(?:共 *)?[1-9][0-9]{0,2} *季$/.test(count);
-    const episodeCount = /^(?:共 *)?[1-9][0-9]{0,2} *集$/.test(duration);
-    const episodes = /^共 *[1-9][0-9]{0,2} *集$/.test(duration) && episodeLabels.length === 1;
-    if (movies.length > 1 || (movies.length && (seasons || episodeCount || episodeRoots.length))) return null;
-    const kind = movies.length === 1 ? 'movie' : seasons || episodes ? 'series' : 'unknown';
-    const scope_evidence = kind === 'movie' ? [{field_path:'full_modal.metadata.movie_label',value:'此电影：'}]
-      : seasons ? [{field_path:'full_modal.metadata.numberOfSeasons',value:count}]
-      : episodes ? [{field_path:'full_modal.metadata.duration',value:duration},
-        {field_path:'full_modal.episode_selector.label',value:'剧集'}] : undefined;
-    return {scope:{kind},scope_evidence,owner,left,right,info,durationNode:durations.length === 1 ? durations[0] : null,duration};
-  }
-  // Preserve credits and display text without inventing cast roles, editorial completeness or series plot scope.
-  function readDetailFactsV2(root, details) {
-    if (!details) return null;
-    const {scope,right,left,info,duration,durationNode} = details, facts = [], lanes = [], seen = new Set();
-    const groups = [...right.querySelectorAll(':scope > [data-uia="previewModal--tags-person"]')];
-    if (groups.length > 1) return null;
-    if (groups.length === 1) {
-      const group = groups[0], labels = group.querySelectorAll(':scope > .previewModal--tags-label');
-      const label = labels.length === 1 ? detailTextV2(labels[0]) : '';
-      const credits = label === '演职员表：';
-      const cast = /^(?:cast|starring|actors?|主演|演员|演員|出演|出演者)\s*[:：]?$/i.test(label);
-      if (visibleObservationNode(group) && (credits || cast)) {
-        for (const [index,item] of [...group.querySelectorAll(':scope > [data-uia="tag-item"]')].slice(0,12).entries()) {
-          const links = item.querySelectorAll('a[href]');
-          if (links.length > 1) continue;
-          const textNode = links[0] || item, value = detailTextV2(textNode).replace(/[,，]\s*$/, '').trim();
-          const bytes = new TextEncoder(), lower = value.toLowerCase();
-          if (!visibleObservationNode(item) || !value
-            || !/^[\p{L}\p{N}\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f '’ .·・()（）&-]+$/u.test(value)
-            || !/[\p{L}\p{N}]/u.test(value) || bytes.encode(value).byteLength > 160
-            || (value.match(/[0-9]/g) || []).length >= 9 || lower.includes('www.') || lower.includes('private key')
-            || /^(?:bearer |sk-|akia)/.test(lower)
-            || value.split(/\s+/).some(part=>bytes.encode(part).byteLength >= 32 && /[a-z]/i.test(part) && /[0-9]/.test(part))
-            || /^(?:more|更多|查看更多|もっと見る|他)$/i.test(value)) continue;
-          let entity;
-          try {
-            const href = links[0]?.getAttribute('href');
-            if (typeof href === 'string' && href.length <= 4096) {
-              const url = new URL(href,'https://www.netflix.com');
-              const match = url.pathname.match(/^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?browse\/person\/([1-9]\d{0,15})\/?$/i);
-              if (url.origin === 'https://www.netflix.com' && !url.username && !url.password && match) entity = 'netflix:'+match[1];
-            }
-          } catch {}
-          const key = JSON.stringify([value,entity || null]);
-          if (seen.has(key)) continue;
-          seen.add(key);
-          facts.push({family:'person',value,scope:{...scope},field_path:'full_modal.'+(credits ? 'credits' : 'cast')+'['+index+']',
-            role:credits ? 'credits_unspecified' : 'cast_unspecified',...(entity ? {entity_id:entity} : {})});
-        }
-        if (facts.length) lanes.push({family:'person',node:group,signature:JSON.stringify(facts.map(f=>[f.value,f.entity_id || null,f.field_path,f.role]))});
-      }
-    }
-    if (scope.kind === 'movie' && durationNode && !durationNode.closest('[data-uia="episode-selector"]')) {
-      const parsed = duration.match(/^([1-9][0-9]?) *小时 *(0|[1-9][0-9]?) *分钟$/);
-      if (parsed) {
-        const hours = Number(parsed[1]), minutes = Number(parsed[2]), value = hours*60+minutes;
-        if (hours <= 24 && minutes <= 59 && value <= 1440) {
-          facts.push({family:'runtime',value,raw_value:duration,unit:'minute',scope:{kind:'movie'},field_path:'full_modal.metadata.duration'});
-          lanes.push({family:'runtime',node:durationNode,signature:duration});
-        }
-      }
-    }
-    if (scope.kind !== 'unknown') {
-      const nodes = left.querySelectorAll(':scope > [data-uia="preview-modal-synopsis"]');
-      if (nodes.length === 1 && !nodes[0].closest('[data-uia="episode-selector"]')) {
-        const value = detailTextV2(nodes[0],true);
-        if (value) {
-          facts.push({family:'display_synopsis',value,scope:{kind:scope.kind === 'movie' ? 'movie' : 'unknown'},
-            field_path:'full_modal.metadata.synopsis',completeness:'unknown',display_state:'unclipped'});
-          lanes.push({family:'display_synopsis',node:nodes[0],signature:value});
-        }
-      }
-    }
-    return {facts,lanes};
-  }
-  const detailObservationSubjectsV2 = new WeakMap();
-  // Recognized v2 layouts fail closed; only other layouts may retain the separate v1 path.
-  function readClientObservationV2(root, info) {
-    if (!root?.matches?.('[role="dialog"].detail-modal')) {
-      return root?.querySelector?.('[data-uia="previewModal--detailsMetadata"]') || detailObservationSubjectsV2.has(root) ? null : undefined;
-    }
-    if (!detailObservationSubjectsV2.has(root)) detailObservationSubjectsV2.set(root,new Map());
-    if (!root.isConnected || !info || info.mini || !/^\d{6,10}$/.test(info.id || '')
-      || !visibleObservationNode(root)) return null;
-    const active = [...document.querySelectorAll('[role="dialog"].detail-modal')].filter(visibleObservationNode);
-    if (active.length !== 1 || active[0] !== root) return null;
-    const before = readDetail(root);
-    if (!before || before.mini || before.id !== info.id || before.title !== info.title || before.mount !== info.mount) return null;
-    const details = readDetailScopeV2(root);
-    if (!details || details.info !== before.mount) return null;
-    const observed = readDetailFactsV2(root,details);
-    if (!observed?.facts.length || observed.facts.length > 14) return null;
-    const after = readDetail(root), checked = readDetailScopeV2(root);
-    if (!root.isConnected || !visibleObservationNode(root) || !after || !checked
-      || after.id !== before.id || after.title !== before.title || after.mount !== before.mount
-      || checked.owner !== details.owner || checked.left !== details.left || checked.right !== details.right
-      || checked.info !== details.info || JSON.stringify([checked.scope,checked.scope_evidence]) !== JSON.stringify([details.scope,details.scope_evidence])) return null;
-    const repeated = readDetailFactsV2(root,checked);
-    if (!repeated || JSON.stringify(repeated.facts) !== JSON.stringify(observed.facts)
-      || repeated.lanes.some((lane,index)=>lane.node !== observed.lanes[index]?.node)
-      || [...document.querySelectorAll('[role="dialog"].detail-modal')].filter(visibleObservationNode).some(other=>other !== root)) return null;
-    const subject = JSON.stringify([info.id,info.title]);
-    const previous = detailObservationSubjectsV2.get(root) || new Map(), next = new Map(previous);
-    let blocked = false;
-    for (const lane of observed.lanes) {
-      const old = previous.get(lane.family);
-      const stale = !!old && old.node === lane.node && old.signature === lane.signature
-        && (old.subject !== subject || old.blocked);
-      next.set(lane.family,{...lane,subject,blocked:stale});
-      blocked = blocked || stale;
-    }
-    // Retain absent lanes too: hiding stale text for one poll must not clear its subject guard.
-    detailObservationSubjectsV2.set(root,next);
-    if (blocked) return null;
-    return {schema_version:'netflix-client-observation/v2',source_id:info.id,extractor_version:'full-modal-dom/v2',
-      observed_at:new Date().toISOString(),scope:details.scope,
-      ...(details.scope_evidence ? {scope_evidence:details.scope_evidence} : {}),facts:observed.facts};
   }
   // Validate detail POST responses without promoting hint-based matches into ID-only mappings.
   function parseDetailResponse(raw, id) {
@@ -629,8 +363,7 @@
       && now-entry.time < (entry.data?.rating ? 86400000 : 3600000);
   }
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {netflixId, parseServiceResponse, cacheFresh, readHints, readClientObservation,
-      detailTextV2,readDetailScopeV2,readDetailFactsV2,readClientObservationV2,parseDetailResponse}; return;
+    module.exports = {netflixId, parseServiceResponse, cacheFresh, readHints, parseDetailResponse}; return;
   }
   if (document.getElementById('nli-style')) return;
   const QUEUE_MAX = 828, CARDS_MAX = 800;
@@ -1561,13 +1294,7 @@
   }
   // Hint-keyed decisions remain temporary until startDetail commits a validated identity.
   function hintKey(id, hints) {
-    const values = [id,hints.title,hints.year ?? null,hints.kind,hints.language,hints.select ?? null];
-    // Wall-clock observation time must not create a new search on every poll or DOM recheck.
-    if (hints.client_observation) {
-      const {observed_at,...content} = hints.client_observation;
-      values.push(content);
-    }
-    return JSON.stringify(values);
+    return JSON.stringify([id,hints.title,hints.year ?? null,hints.kind,hints.language,hints.select ?? null]);
   }
   function detailValid(item, key, revision) {
     const info = readDetail(item.card), hints = info && readHints(item.card,info);
@@ -1606,9 +1333,8 @@
             result = {...parseDetailResponse(raw,item.id),raw};
           }
           if (result.status === 'ok') return {...result,selectionExpired:expired};
-          if (['ok','missing','ambiguous'].includes(result.status)) {
-            const until = result.status === 'ok' ? Date.now()+86400000 : result.retryAt;
-            detailCache[hintKey(item.id,requestHints)] = {time:Date.now(),until,epoch,raw:result.raw};
+          if (['missing','ambiguous'].includes(result.status)) {
+            detailCache[hintKey(item.id,requestHints)] = {time:Date.now(),until:result.retryAt,epoch,raw:result.raw};
             const keys = Object.keys(detailCache).sort((a,b)=>detailCache[a].time-detailCache[b].time);
             while (Object.keys(detailCache).length > 1024) delete detailCache[keys.shift()];
             await saveDetailCache(item.id);
