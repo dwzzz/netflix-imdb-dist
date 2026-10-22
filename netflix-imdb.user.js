@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         映尺 · Netflix IMDb 评分
 // @namespace    https://github.com/dwzzz/netflix-imdb-dist
-// @version      1.0.7
+// @version      1.0.8
 // @description  在 Netflix 页面显示 IMDb / 豆瓣评分，自动匹配作品，必要时可手动纠正。
 // @antifeature  membership 需要邀请码注册并生成 API key 才能使用；服务完全免费，邀请机制仅用于防止接口被爬虫或滥用。
 // @license      MIT
@@ -30,6 +30,7 @@
  * Supplementary Douban snapshots retain only validated metadata compatible with the confirmed title and link scope.
  * First-time setup links to the public invitation guide and distinguishes an API key from an invitation code.
  * Full-detail matching uses bounded title, year, kind and language hints.
+ * Ordinary series detail misses reuse the shared ID-only lookup for an explicitly scoped catalog rating.
  * Detail hints use conflict-free title identities and API-compatible locale tags without weakening match evidence.
  * Scoped catalog-series identities retain explicit whole-series scope and never certify an episode or season.
  * Explicit episodic cards and episode/conflicting detail identities are excluded before rating lookup.
@@ -1397,6 +1398,13 @@
           detailCache[key] = {time:Date.now(),until:Date.now()+86400000,epoch,raw:result.raw};
           await saveDetailCache(item.id);
         }
+      }
+      if (!force && !hints.select && hints.kind === 'series'
+        && result.status === 'missing' && !result.candidates?.length) {
+        // Reuse the background GET without extending the detail budget; its success refreshes every card.
+        resolve(item).catch(error => {
+          if (!error.cancelled && !error.needsSelection) lastError = error.message;
+        });
       }
       item.detailResult = result;
       if (result.selectionExpired) item.detailKey = item.detailBase;
